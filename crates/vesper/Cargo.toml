@@ -1,0 +1,30 @@
+[package]
+name = "vesper"
+description = "Language server for the dusk programming language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "vesper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vesper"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "macros", "sync"] }
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The dusk compiler, linked as a library. Vesper reuses its lexer, parser, and
+# checker instead of reimplementing them. This is a path dependency for local
+# work; a published build pins a git revision instead.
+dusk = { package = "dusk-lang", path = "../../../../cool-lang" }
