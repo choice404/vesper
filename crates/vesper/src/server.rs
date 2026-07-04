@@ -124,6 +124,16 @@ impl LanguageServer for Backend {
                         ..Default::default()
                     },
                 )),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: compiler::legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
         })
@@ -137,6 +147,20 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let Some(text) = self.store.text(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let data = compiler::semantic_tokens(&text);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {

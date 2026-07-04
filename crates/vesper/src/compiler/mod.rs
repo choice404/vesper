@@ -5,5 +5,7 @@
 //! is the one place vesper has to follow.
 
 mod analyze;
+mod tokens;
 
 pub use analyze::{semantic_diagnostics, syntax_diagnostics, FileDiagnostics};
+pub use tokens::{legend, semantic_tokens};
