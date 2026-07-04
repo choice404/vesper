@@ -11,9 +11,9 @@ Vesper speaks the Language Server Protocol over stdio, so it works in any editor
 Vesper is early, and it tracks dusk, which is pre 1.0 and still moving, so expect rough edges.
 
 - [x] Diagnostics, live as you type for syntax and on save for names and types
-- [ ] Semantic token highlighting
-- [ ] Hover, go to definition, and find references
-- [ ] Document and workspace symbols
+- [x] Semantic token highlighting
+- [x] Hover, go to definition, and find references
+- [x] Document and workspace symbols
 - [ ] A tree-sitter grammar for baseline coloring
 - [ ] Prebuilt binaries, a VS Code extension, and a mason entry
 
@@ -49,9 +49,11 @@ The server binary lands at `target/release/vesper`.
 
 ---
 
-## Editor Setup
+## Neovim
 
-### Neovim
+Neovim 0.11 or later, since the setup uses the built in `vim.lsp.config` and `vim.lsp.enable`. Build vesper first (see Build), then use one of the setups below. Point `duskHome` at a dusk checkout so `@import std.*` resolves, unless the server can already find the standard library beside its binary.
+
+### Plain config
 
 ```lua
 vim.filetype.add({ extension = { dusk = "dusk" } })
@@ -65,7 +67,45 @@ vim.lsp.config("vesper", {
 vim.lsp.enable("vesper")
 ```
 
-Open a `.dusk` file and vesper attaches. A syntax error shows as you type, and a name or type error shows when you save.
+Or add `editors/nvim` from this repo to your runtime path, which detects `.dusk` files and sets the comment string on its own, then call `require("vesper").setup({ cmd = { "/path/to/vesper" } })`.
+
+### LazyVim
+
+vesper is not in `nvim-lspconfig`, so register it yourself. Add a file under `~/.config/nvim/lua/plugins/`, for example `dusk.lua`:
+
+```lua
+return {
+  {
+    "neovim/nvim-lspconfig",
+    opts = {
+      servers = {
+        vesper = {
+          cmd = { "vesper" }, -- or the full path to the binary
+          filetypes = { "dusk" },
+          root_markers = { "dusk.toml", ".git" },
+          init_options = { duskHome = vim.fn.expand("~/path/to/dusk") },
+        },
+      },
+      setup = {
+        vesper = function(_, opts)
+          vim.filetype.add({ extension = { dusk = "dusk" } })
+          vim.lsp.config("vesper", opts)
+          vim.lsp.enable("vesper")
+          return true
+        end,
+      },
+    },
+  },
+}
+```
+
+The `setup` handler returns `true` so LazyVim does not also try to start vesper through `nvim-lspconfig`, which does not know it yet.
+
+### Mason
+
+vesper is not in the mason registry yet, so `:MasonInstall vesper` will not find it. Build it from source and point `cmd` at the binary, or put the binary on your `PATH` and leave `cmd = { "vesper" }`. Mason still manages your other tools as usual. A mason entry is on the roadmap, and once it lands you will install vesper like any other server.
+
+Open a `.dusk` file and vesper attaches. Diagnostics show as you type and on save, and highlighting, hover, go to definition, find references, and document and workspace symbols all work.
 
 VS Code support is coming.
 
