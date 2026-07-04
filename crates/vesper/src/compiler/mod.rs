@@ -10,5 +10,6 @@ mod symbols;
 mod tokens;
 
 pub use analyze::{semantic_diagnostics, syntax_diagnostics, FileDiagnostics};
-pub use symbols::{definition, document_symbols, hover, Symbol};
+pub use builtins::is_primitive;
+pub use symbols::{definition, document_symbols, hover, identifiers, name_at, Symbol};
 pub use tokens::{legend, semantic_tokens};

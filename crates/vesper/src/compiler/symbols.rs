@@ -97,6 +97,35 @@ pub fn definition(text: &str, pos: Position) -> Option<Range> {
         .map(|s| s.name_range)
 }
 
+/// The identifier under a protocol position, with its range, or nothing when the
+/// position is not on a name.
+pub fn name_at(text: &str, pos: Position) -> Option<(String, Range)> {
+    let index = LineIndex::new(text);
+    let offset = index.offset(text, pos);
+    ident_at(text, offset, &index)
+}
+
+/// Every identifier occurrence in a document, with its range. This is the raw
+/// material for find references, which matches by name since the compiler does
+/// not hand back a resolved symbol per use.
+pub fn identifiers(text: &str) -> Vec<(String, Range)> {
+    let (tokens, _) = lex(text);
+    let index = LineIndex::new(text);
+    tokens
+        .iter()
+        .filter_map(|tok| match &tok.kind {
+            TokenKind::Ident(name) => Some((
+                name.clone(),
+                Range::new(
+                    index.position(text, tok.span.lo),
+                    index.position(text, tok.span.hi),
+                ),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The identifier whose span covers `offset`, with its range. The end is
 /// inclusive so a cursor resting just past the last character still lands on it.
 fn ident_at(text: &str, offset: u32, index: &LineIndex) -> Option<(String, Range)> {

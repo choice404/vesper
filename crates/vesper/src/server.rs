@@ -2,7 +2,8 @@
 //! the lifecycle requests, and publishes diagnostics as files open, change, and
 //! save.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use tower_lsp::jsonrpc::Result;
@@ -12,6 +13,7 @@ use tower_lsp::{Client, LanguageServer};
 use crate::compiler;
 use crate::config::Config;
 use crate::store::Store;
+use crate::workspace::Workspace;
 
 /// The server state shared across every request task.
 pub struct Backend {
@@ -23,6 +25,12 @@ pub struct Backend {
     /// name or type error would vanish on the first keystroke and only return on
     /// the next save.
     semantic: Arc<DashMap<Url, Vec<Diagnostic>>>,
+    /// The project wide index that backs references, workspace symbols, and cross
+    /// file definitions.
+    workspace: Arc<Workspace>,
+    /// The workspace root directories, captured at initialize and walked once the
+    /// client signals it is ready.
+    roots: Mutex<Vec<PathBuf>>,
 }
 
 impl Backend {
@@ -31,6 +39,16 @@ impl Backend {
             client,
             store: Arc::new(Store::new()),
             semantic: Arc::new(DashMap::new()),
+            workspace: Arc::new(Workspace::new()),
+            roots: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Reindexes a file in the workspace from its current buffer, so references
+    /// and symbols follow edits without waiting for a save.
+    fn reindex(&self, uri: &Url) {
+        if let Some(text) = self.store.text(uri) {
+            self.workspace.index(uri.clone(), &text);
         }
     }
 
@@ -106,6 +124,7 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        *self.roots.lock().unwrap() = workspace_roots(&params);
         Config::from_value(params.initialization_options).apply();
 
         Ok(InitializeResult {
@@ -137,14 +156,39 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        // Walk the workspace off the async runtime and index every dusk file, so
+        // references and workspace symbols work before a file is even opened.
+        let roots = self.roots.lock().unwrap().clone();
+        let workspace = self.workspace.clone();
+        let indexed = tokio::task::spawn_blocking(move || {
+            let mut count = 0usize;
+            for root in &roots {
+                for path in dusk_files(root) {
+                    if let (Ok(text), Ok(uri)) =
+                        (std::fs::read_to_string(&path), Url::from_file_path(&path))
+                    {
+                        // Do not clobber a file an editor already opened and
+                        // indexed from a newer buffer.
+                        workspace.index_if_absent(uri, &text);
+                        count += 1;
+                    }
+                }
+            }
+            count
+        })
+        .await
+        .unwrap_or(0);
+
         self.client
-            .log_message(MessageType::INFO, "vesper ready")
+            .log_message(MessageType::INFO, format!("vesper ready, indexed {indexed} files"))
             .await;
     }
 
@@ -171,7 +215,22 @@ impl LanguageServer for Backend {
         let Some(text) = self.store.text(&pos.text_document.uri) else {
             return Ok(None);
         };
-        Ok(compiler::hover(&text, pos.position))
+        // The file's own declarations and builtin types answer first, precisely.
+        if let Some(hover) = compiler::hover(&text, pos.position) {
+            return Ok(Some(hover));
+        }
+        // Otherwise fall back to a declaration elsewhere in the workspace, so a
+        // call into another file still shows a signature.
+        let Some((name, range)) = compiler::name_at(&text, pos.position) else {
+            return Ok(None);
+        };
+        Ok(self.workspace.detail(&name).map(|detail| Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```dusk\n{detail}\n```"),
+            }),
+            range: Some(range),
+        }))
     }
 
     async fn goto_definition(
@@ -183,8 +242,53 @@ impl LanguageServer for Backend {
         let Some(text) = self.store.text(&uri) else {
             return Ok(None);
         };
-        Ok(compiler::definition(&text, pos.position)
-            .map(|range| GotoDefinitionResponse::Scalar(Location::new(uri, range))))
+        let Some((name, _)) = compiler::name_at(&text, pos.position) else {
+            return Ok(None);
+        };
+        // The workspace index holds this file too, so its own definitions are
+        // covered along with every other file's.
+        let defs = self.workspace.definitions(&name);
+        Ok(match defs.len() {
+            0 => None,
+            1 => Some(GotoDefinitionResponse::Scalar(defs.into_iter().next().unwrap())),
+            _ => Some(GotoDefinitionResponse::Array(defs)),
+        })
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let pos = params.text_document_position;
+        let uri = pos.text_document.uri;
+        let Some(text) = self.store.text(&uri) else {
+            return Ok(None);
+        };
+        let Some((name, _)) = compiler::name_at(&text, pos.position) else {
+            return Ok(None);
+        };
+        // A name the workspace declares is a global and ranges over every file; a
+        // name it does not is likely a local, so it stays in this one.
+        let restrict = if self.workspace.declares(&name) {
+            None
+        } else {
+            Some(&uri)
+        };
+        let mut refs = self.workspace.references(&name, restrict);
+        // Honor the client's request to leave declarations out of the results.
+        if !params.context.include_declaration {
+            let defs = self.workspace.definitions(&name);
+            refs.retain(|r| {
+                !defs
+                    .iter()
+                    .any(|d| d.uri == r.uri && d.range == r.range)
+            });
+        }
+        Ok(Some(refs))
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        Ok(Some(self.workspace.symbols(&params.query)))
     }
 
     async fn document_symbol(
@@ -204,6 +308,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let doc = params.text_document;
         self.store.open(doc.uri.clone(), doc.text, doc.version);
+        self.reindex(&doc.uri);
         self.refresh(doc.uri, true).await;
     }
 
@@ -216,19 +321,89 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         self.store
             .update(uri.clone(), change.text, params.text_document.version);
+        self.reindex(&uri);
         self.refresh(uri, false).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.refresh(params.text_document.uri, true).await;
+        let uri = params.text_document.uri;
+        self.reindex(&uri);
+        self.refresh(uri, true).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.store.close(&uri);
         self.semantic.remove(&uri);
+        // The buffer is gone, so the index must reflect the file on disk again,
+        // or drop the file if it no longer exists. Otherwise abandoned edits would
+        // haunt references and definitions for the rest of the session.
+        match uri
+            .to_file_path()
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+        {
+            Some(text) => self.workspace.index(uri.clone(), &text),
+            None => self.workspace.remove(&uri),
+        }
         // Clear anything the editor still shows for a file it no longer tracks.
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
+}
+
+/// The workspace root directories, preferring the folders the client lists and
+/// falling back to the single root uri older clients send.
+#[allow(deprecated)]
+fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(folders) = &params.workspace_folders {
+        for folder in folders {
+            if let Ok(path) = folder.uri.to_file_path() {
+                roots.push(path);
+            }
+        }
+    }
+    if roots.is_empty() {
+        if let Some(path) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+/// Every `.dusk` file under a directory.
+fn dusk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_dusk(root, &mut out);
+    out
+}
+
+/// Walks a directory for dusk files, skipping version control and build output
+/// so a large tree does not stall startup.
+fn collect_dusk(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // Use the entry's own type, which does not follow symlinks, so a symlink
+        // cycle cannot send the walk into infinite recursion.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            let skip = matches!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(".git") | Some("target") | Some("node_modules") | Some(".dawn")
+            );
+            if !skip {
+                collect_dusk(&path, out);
+            }
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("dusk")
+        {
+            out.push(path);
+        }
     }
 }
 

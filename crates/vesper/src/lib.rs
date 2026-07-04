@@ -13,6 +13,7 @@ pub mod document;
 pub mod position;
 pub mod server;
 pub mod store;
+pub mod workspace;
 
 pub use server::Backend;
 
