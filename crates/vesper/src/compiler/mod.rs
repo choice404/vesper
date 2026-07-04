@@ -5,7 +5,10 @@
 //! is the one place vesper has to follow.
 
 mod analyze;
+mod builtins;
+mod symbols;
 mod tokens;
 
 pub use analyze::{semantic_diagnostics, syntax_diagnostics, FileDiagnostics};
+pub use symbols::{definition, document_symbols, hover, Symbol};
 pub use tokens::{legend, semantic_tokens};

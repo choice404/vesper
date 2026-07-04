@@ -134,6 +134,9 @@ impl LanguageServer for Backend {
                         },
                     ),
                 ),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
         })
@@ -161,6 +164,41 @@ impl LanguageServer for Backend {
             result_id: None,
             data,
         })))
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let pos = params.text_document_position_params;
+        let Some(text) = self.store.text(&pos.text_document.uri) else {
+            return Ok(None);
+        };
+        Ok(compiler::hover(&text, pos.position))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let pos = params.text_document_position_params;
+        let uri = pos.text_document.uri;
+        let Some(text) = self.store.text(&uri) else {
+            return Ok(None);
+        };
+        Ok(compiler::definition(&text, pos.position)
+            .map(|range| GotoDefinitionResponse::Scalar(Location::new(uri, range))))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let Some(text) = self.store.text(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let symbols = compiler::document_symbols(&text)
+            .into_iter()
+            .map(to_document_symbol)
+            .collect();
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -191,5 +229,22 @@ impl LanguageServer for Backend {
         self.semantic.remove(&uri);
         // Clear anything the editor still shows for a file it no longer tracks.
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
+}
+
+/// Converts a vesper symbol into the protocol's document symbol. The name range
+/// stands in for the full range too, since the tree does not span a whole
+/// declaration.
+fn to_document_symbol(symbol: compiler::Symbol) -> DocumentSymbol {
+    #[allow(deprecated)]
+    DocumentSymbol {
+        name: symbol.name,
+        detail: Some(symbol.detail),
+        kind: symbol.kind,
+        tags: None,
+        deprecated: None,
+        range: symbol.name_range,
+        selection_range: symbol.name_range,
+        children: None,
     }
 }

@@ -16,6 +16,7 @@ use tower_lsp::lsp_types::{
 use dusk::lexer::lex;
 use dusk::lexer::token::{Keyword, Token, TokenKind};
 
+use super::builtins::is_primitive;
 use crate::position::LineIndex;
 
 /// The highlighting roles vesper emits. The order here is the legend order, so
@@ -240,32 +241,6 @@ fn classify(tokens: &[Token], _text: &str) -> Vec<Raw> {
 /// call or a declaration's parameter list.
 fn next_is_call(tokens: &[Token], i: usize) -> bool {
     matches!(tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::LParen))
-}
-
-/// The primitive type names, matching the compiler's own builtin type set in
-/// `sema::resolve::is_type_name`. They lex as ordinary identifiers, so
-/// highlighting recognizes them by spelling. `error` is not among them: it is a
-/// value type the compiler resolves elsewhere, and a name spelled `error` in
-/// value position is an ordinary identifier.
-fn is_primitive(name: &str) -> bool {
-    matches!(
-        name,
-        "int8"
-            | "int16"
-            | "int32"
-            | "int64"
-            | "uint8"
-            | "uint16"
-            | "uint32"
-            | "uint64"
-            | "float32"
-            | "float64"
-            | "bool"
-            | "char"
-            | "string"
-            | "void"
-            | "thread"
-    )
 }
 
 /// Recovers comment spans by scanning the gaps between token spans for `//`. A
