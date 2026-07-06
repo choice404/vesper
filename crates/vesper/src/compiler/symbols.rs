@@ -34,6 +34,12 @@ pub struct Symbol {
 /// and foreign blocks, in source order.
 pub fn document_symbols(text: &str) -> Vec<Symbol> {
     let (tokens, _) = lex(text);
+    // The outline needs the parser for signatures, so a buffer too deep for the
+    // parser has no outline rather than a crash. Hover and definition read the
+    // outline, so they fall quiet on the same buffers.
+    if super::guard::check(&tokens).is_some() {
+        return Vec::new();
+    }
     let index = LineIndex::new(text);
     let sites = decl_sites(&tokens, text, &index);
     let (module, _) = parser::parse(tokens);
@@ -346,6 +352,8 @@ fn type_str(t: &ast::Type) -> String {
             format!("({inner}) -> {}", type_str(ret))
         }
         ast::Type::Unit => "void".to_string(),
+        // An inferred type placeholder, before the checker fills it in.
+        ast::Type::Infer => "_".to_string(),
     }
 }
 
@@ -447,6 +455,19 @@ func main() -> int32 {\n\
     fn renders_named_enum_variant_fields() {
         let d = detail_of("enum Shape { Circle(radius: float64), Empty }\n", "Shape");
         assert!(d.contains("Circle(radius: float64)"), "{d}");
+    }
+
+    #[test]
+    fn a_pathologically_nested_buffer_has_no_outline() {
+        // The outline parses for signatures, so the same guard applies. Reaching
+        // the assertion proves document_symbols did not drive the parser off its
+        // stack; the empty result is the graceful degrade.
+        let deep = format!(
+            "func main() -> int32 {{\n    return {}0{}\n}}\n",
+            "(".repeat(30_000),
+            ")".repeat(30_000)
+        );
+        assert!(document_symbols(&deep).is_empty());
     }
 
     #[test]

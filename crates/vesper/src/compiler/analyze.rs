@@ -10,6 +10,7 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use dusk::diag::Diagnostic as DuskDiag;
 use dusk::loader::{self, FileSrc};
 
+use super::guard::{self, TooComplex};
 use crate::position::LineIndex;
 
 /// Lexes, parses, and paradigm gates one buffer, returning the diagnostics that
@@ -19,6 +20,15 @@ use crate::position::LineIndex;
 pub fn syntax_diagnostics(text: &str) -> Vec<Diagnostic> {
     let index = LineIndex::new(text);
     let (tokens, lex_errs) = dusk::lexer::lex(text);
+
+    // Hold a pathologically shaped buffer back from the parser. The dusk parser
+    // is recursive descent with no depth limit, so a wall of brackets or a chain
+    // thousands deep would overflow its stack and abort the process, which Rust
+    // cannot catch. One clear note stands in for the analysis that is skipped.
+    if let Some((why, at)) = guard::check(&tokens) {
+        return vec![guard_diag(&index, text, why, at)];
+    }
+
     let (module, parse_errs) = dusk::parser::parse(tokens);
 
     let mut out = Vec::new();
@@ -48,6 +58,17 @@ pub struct FileDiagnostics {
 /// This reads from disk. Vesper calls it on open and save, when the buffer and
 /// the file on disk agree, not on every keystroke.
 pub fn semantic_diagnostics(path: &str) -> Vec<FileDiagnostics> {
+    // Guard the root before the loader parses it. The loader reads and parses the
+    // file itself, so a pathological root would overflow the parser mid load. The
+    // syntax pass already showed the reason against the buffer, so here just skip
+    // the load rather than repeat it.
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let (tokens, _) = dusk::lexer::lex(&text);
+        if guard::check(&tokens).is_some() {
+            return Vec::new();
+        }
+    }
+
     let prog = loader::load(path);
 
     let Some(module) = prog.module.as_ref() else {
@@ -73,7 +94,9 @@ pub fn semantic_diagnostics(path: &str) -> Vec<FileDiagnostics> {
     }
 
     let desugared = dusk::desugar::run(module);
-    let diags = dusk::sema::check(&desugared);
+    // sema::check now hands back a span to type map alongside its diagnostics.
+    // Vesper does not use the types yet, so keep only the diagnostics.
+    let (diags, _types) = dusk::sema::check(&desugared);
     group_by_file(&prog.files, &diags)
 }
 
@@ -146,6 +169,22 @@ fn dusk_diag(range: Range, message: &str) -> Diagnostic {
     }
 }
 
+/// Builds the note vesper shows where it held a buffer back from the parser. It
+/// is tagged as coming from vesper, not dusk, and warns rather than errors, since
+/// the code may be perfectly valid, only too deep to analyze without risking the
+/// parser. The range covers the token that first crossed the limit.
+fn guard_diag(index: &LineIndex, text: &str, why: TooComplex, at: u32) -> Diagnostic {
+    let start = index.position(text, at);
+    let end = index.position(text, at + 1);
+    Diagnostic {
+        range: Range::new(start, end),
+        severity: Some(DiagnosticSeverity::WARNING),
+        source: Some("vesper".to_string()),
+        message: why.reason().to_string(),
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +199,22 @@ mod tests {
     fn a_broken_program_reports_a_syntax_diagnostic() {
         let src = "func main( -> int32 {\n}\n";
         assert!(!syntax_diagnostics(src).is_empty());
+    }
+
+    #[test]
+    fn a_pathologically_nested_buffer_is_guarded_not_parsed() {
+        // Without the guard this wall of brackets overflows the parser stack and
+        // aborts the process. The test running to its assertions at all is the
+        // proof the guard stops that; the assertions prove it says why, once,
+        // tagged as vesper's own note rather than a dusk error.
+        let deep = format!(
+            "func main() -> int32 {{\n    return {}0{}\n}}\n",
+            "(".repeat(30_000),
+            ")".repeat(30_000)
+        );
+        let diags = syntax_diagnostics(&deep);
+        assert_eq!(diags.len(), 1, "one guard note stands in for analysis");
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::WARNING));
+        assert_eq!(diags[0].source.as_deref(), Some("vesper"));
     }
 }

@@ -168,27 +168,44 @@ impl LanguageServer for Backend {
         // references and workspace symbols work before a file is even opened.
         let roots = self.roots.lock().unwrap().clone();
         let workspace = self.workspace.clone();
-        let indexed = tokio::task::spawn_blocking(move || {
+        let (indexed, bytes) = tokio::task::spawn_blocking(move || {
             let mut count = 0usize;
+            let mut bytes = 0u64;
             for root in &roots {
-                for path in dusk_files(root) {
+                for path in dusk_files(root, MAX_INDEX_FILES) {
+                    // Stop once the scan has read enough. A root pointed at a home
+                    // directory, or a marker high in the tree, would otherwise pull
+                    // the whole thing into the index at startup. Files past the cap
+                    // still index the moment a user opens them.
+                    if count >= MAX_INDEX_FILES || bytes >= MAX_INDEX_BYTES {
+                        break;
+                    }
                     if let (Ok(text), Ok(uri)) =
                         (std::fs::read_to_string(&path), Url::from_file_path(&path))
                     {
                         // Do not clobber a file an editor already opened and
                         // indexed from a newer buffer.
+                        bytes += text.len() as u64;
                         workspace.index_if_absent(uri, &text);
                         count += 1;
                     }
                 }
             }
-            count
+            (count, bytes)
         })
         .await
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
 
+        let note = if indexed >= MAX_INDEX_FILES || bytes >= MAX_INDEX_BYTES {
+            ", stopped at the index cap, the rest index when opened"
+        } else {
+            ""
+        };
         self.client
-            .log_message(MessageType::INFO, format!("vesper ready, indexed {indexed} files"))
+            .log_message(
+                MessageType::INFO,
+                format!("vesper ready, indexed {indexed} files{note}"),
+            )
             .await;
     }
 
@@ -371,20 +388,36 @@ fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
     roots
 }
 
-/// Every `.dusk` file under a directory.
-fn dusk_files(root: &Path) -> Vec<PathBuf> {
+/// The most files the startup scan reads into the index, and the most source
+/// bytes it reads, before it stops. A very large tree, or a root that resolves to
+/// a home directory, would otherwise be read and held whole. Files past the cap
+/// still index the moment a user opens one.
+const MAX_INDEX_FILES: usize = 5_000;
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Every `.dusk` file under a directory, up to `limit` of them. The walk stops
+/// once it has collected the limit, so a huge tree neither stalls startup nor
+/// fills memory with paths.
+fn dusk_files(root: &Path, limit: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_dusk(root, &mut out);
+    collect_dusk(root, &mut out, limit);
     out
 }
 
 /// Walks a directory for dusk files, skipping version control and build output
-/// so a large tree does not stall startup.
-fn collect_dusk(dir: &Path, out: &mut Vec<PathBuf>) {
+/// so a large tree does not stall startup, and stopping once `out` holds `limit`
+/// files.
+fn collect_dusk(dir: &Path, out: &mut Vec<PathBuf>, limit: usize) {
+    if out.len() >= limit {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        if out.len() >= limit {
+            return;
+        }
         // Use the entry's own type, which does not follow symlinks, so a symlink
         // cycle cannot send the walk into infinite recursion.
         let Ok(file_type) = entry.file_type() else {
@@ -397,7 +430,7 @@ fn collect_dusk(dir: &Path, out: &mut Vec<PathBuf>) {
                 Some(".git") | Some("target") | Some("node_modules") | Some(".dawn")
             );
             if !skip {
-                collect_dusk(&path, out);
+                collect_dusk(&path, out, limit);
             }
         } else if file_type.is_file()
             && path.extension().and_then(|e| e.to_str()) == Some("dusk")

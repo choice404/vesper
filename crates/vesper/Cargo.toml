@@ -28,3 +28,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # checker instead of reimplementing them. This is a path dependency for local
 # work; a published build pins a git revision instead.
 dusk = { package = "dusk-lang", path = "../../../../cool-lang" }
+
+# Used only to cap the process address space at startup, so a runaway in the
+# linked compiler aborts at a ceiling instead of exhausting the machine.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

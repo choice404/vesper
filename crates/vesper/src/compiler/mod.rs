@@ -6,6 +6,7 @@
 
 mod analyze;
 mod builtins;
+mod guard;
 mod symbols;
 mod tokens;
 
