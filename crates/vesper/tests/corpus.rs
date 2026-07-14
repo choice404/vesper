@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 
 use vesper::compiler::syntax_diagnostics;
 
-/// The dusk standard library directory, relative to this crate.
+/// The dusk standard library directory, relative to this crate. This is the
+/// frozen seed's own stdlib, the body of dusk that matches the front end vesper
+/// links, so the syntax pass is expected to parse every file in it clean.
 fn stdlib_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../cool-lang/lib/std")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../dusk-rust/lib/std")
 }
 
 /// Collects every `.dusk` file under `dir`.

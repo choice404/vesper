@@ -25,9 +25,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # The dusk compiler, linked as a library. Vesper reuses its lexer, parser, and
-# checker instead of reimplementing them. This is a path dependency for local
-# work; a published build pins a git revision instead.
-dusk = { package = "dusk-lang", path = "../../../../cool-lang" }
+# checker instead of reimplementing them. This pins the frozen Rust seed, the
+# last Rust build of the compiler at v1.3.0, whose front end is the reference
+# for the language surface through 1.2.0. The compiler itself now self hosts in
+# dusk, so this crate is the fixed surface vesper analyzes against.
+dusk = { package = "dusk-lang", path = "../../../../dusk-rust" }
 
 # Used only to cap the process address space at startup, so a runaway in the
 # linked compiler aborts at a ceiling instead of exhausting the machine.

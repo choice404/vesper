@@ -351,6 +351,9 @@ fn type_str(t: &ast::Type) -> String {
             let inner = params.iter().map(type_str).collect::<Vec<_>>().join(", ");
             format!("({inner}) -> {}", type_str(ret))
         }
+        // A collected wrapper, `collector<T>`, whose runtime rep is a managed
+        // pointer but whose spelling at the surface is the generic form.
+        ast::Type::Collector(inner) => format!("collector<{}>", type_str(inner)),
         ast::Type::Unit => "void".to_string(),
         // An inferred type placeholder, before the checker fills it in.
         ast::Type::Infer => "_".to_string(),
